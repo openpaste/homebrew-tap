@@ -1,6 +1,6 @@
 cask "openpaste" do
-  version "1.1.2"
-  sha256 "1368870292e65cc4869b8077718d95ec50fb9f3ca7f8ea2eb8f036d03d893425"
+  version "1.2.0"
+  sha256 "cc10b2551e4e46f6092edb31e2bbb8ad0ed275542ab53f565f5618f49d53aaa7"
 
   url "https://github.com/openpaste/openpaste/releases/download/v#{version}/OpenPaste-#{version}.dmg"
   name "OpenPaste"
