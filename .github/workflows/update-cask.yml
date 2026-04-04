@@ -7,18 +7,77 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: ${{ github.workflow }}-openpaste
+  cancel-in-progress: false
+
 jobs:
   update:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6.0.2
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
 
-      - name: Update cask version and SHA
+      - name: Classify payload
+        id: guard
         run: |
           VERSION="${{ github.event.client_payload.version }}"
           SHA256="${{ github.event.client_payload.sha256 }}"
-          URL="${{ github.event.client_payload.url }}"
+          CURRENT_VERSION=$(sed -n 's/^  version "\(.*\)"$/\1/p' Casks/openpaste.rb | head -1)
+          CURRENT_SHA=$(sed -n 's/^  sha256 "\(.*\)"$/\1/p' Casks/openpaste.rb | head -1)
+
+          if [ -z "$VERSION" ] || [ -z "$SHA256" ]; then
+            echo "::error::Missing version or sha256 in repository_dispatch payload"
+            exit 1
+          fi
+
+          if [ -z "$CURRENT_VERSION" ] || [ -z "$CURRENT_SHA" ]; then
+            echo "::error::Could not parse current version or sha256 from Casks/openpaste.rb"
+            exit 1
+          fi
+
+          VERSION_COMPARE=$(ruby -e 'require "rubygems"; puts(Gem::Version.new(ARGV[0]) <=> Gem::Version.new(ARGV[1]))' "$VERSION" "$CURRENT_VERSION")
+
+          if [ "$VERSION" = "$CURRENT_VERSION" ] && [ "$SHA256" = "$CURRENT_SHA" ]; then
+            ACTION="duplicate"
+          elif [ "$VERSION" = "$CURRENT_VERSION" ] && [ "$SHA256" != "$CURRENT_SHA" ]; then
+            ACTION="conflict"
+          elif [ "$VERSION_COMPARE" -lt 0 ]; then
+            ACTION="stale"
+          else
+            ACTION="apply"
+          fi
+
+          echo "action=$ACTION" >> "$GITHUB_OUTPUT"
+          echo "current_version=$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
+          echo "current_sha=$CURRENT_SHA" >> "$GITHUB_OUTPUT"
+
+          case "$ACTION" in
+            apply)
+              echo "==> Applying payload version $VERSION over current version $CURRENT_VERSION"
+              ;;
+            duplicate)
+              echo "==> Duplicate payload for version $VERSION; nothing to do"
+              ;;
+            stale)
+              echo "==> Stale payload version $VERSION; current tap already has newer version $CURRENT_VERSION"
+              ;;
+            conflict)
+              echo "::error::Received conflicting sha256 for version $VERSION"
+              echo "::error::Current sha256: $CURRENT_SHA"
+              echo "::error::Payload sha256: $SHA256"
+              exit 1
+              ;;
+          esac
+
+      - name: Update cask version and SHA
+        if: steps.guard.outputs.action == 'apply'
+        run: |
+          VERSION="${{ github.event.client_payload.version }}"
+          SHA256="${{ github.event.client_payload.sha256 }}"
 
           sed -i "s|version \".*\"|version \"${VERSION}\"|" Casks/openpaste.rb
           sed -i "s|sha256 \".*\"|sha256 \"${SHA256}\"|" Casks/openpaste.rb
@@ -26,9 +85,21 @@ jobs:
           echo "Updated to v${VERSION} (sha256: ${SHA256})"
 
       - name: Commit & push
+        if: steps.guard.outputs.action == 'apply'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Casks/openpaste.rb
+
+          if git diff --cached --quiet; then
+            echo "==> No cask changes staged after apply step; skipping commit"
+            exit 0
+          fi
+
           git commit -m "chore: bump openpaste to v${{ github.event.client_payload.version }}"
-          git push
+          git push origin HEAD:${{ github.event.repository.default_branch }}
+
+      - name: Skip duplicate or stale payload
+        if: steps.guard.outputs.action == 'duplicate' || steps.guard.outputs.action == 'stale'
+        run: |
+          echo "==> update-cask finished with no-op action: ${{ steps.guard.outputs.action }}"
